@@ -1,0 +1,77 @@
+# wakeword_demo.resc
+#
+# Runs this project's firmware (built with the "stm32-renode" preset, which
+# links ../../stm32f4_audio_examples/audio_in_to_wav/src/synthetic_mic.c
+# instead of pdm_mic.c -- Renode has no PDM microphone model, so real mic
+# capture cannot be emulated) and bridges USART2 to a TCP socket so a host
+# script can read the "PREDICTION: <label> conf=<float>" lines it prints,
+# exactly like real hardware -- just replaying WAV-derived samples instead
+# of live sound.
+#
+# Adapted from
+# ../../stm32f4_audio_examples/audio_in_to_wav/renode/audio_in_demo.resc.
+# Behavioral difference from that reference: this firmware prints inference
+# PREDICTIONS over UART, not raw PCM -- this is what a future
+# ../../lab1_wakeword_test Robot-Framework grading repo will assert on with
+# `Wait For Line On Uart`.
+#
+# Which reference WAV gets replayed is selected here at Renode invocation
+# time, not at build time: $pcm_file/$pcm_samples default to
+# renode/default_synthetic_audio.bin, a 2-second clip (two back-to-back 1s
+# words -- "yes" then "stop", see ../testdata/sample_yes_stop_2s.wav) picked
+# so this demo produces two distinct PREDICTION lines from the default
+# non-overlapping 1s inference window. `sysbus LoadBinary` below overwrites
+# synthetic_mic.c's synthetic_audio_pcm buffer in-place with whatever this
+# points at -- so a single compiled firmware.elf can replay any WAV (up to
+# the buffer's compiled-in 96000-sample/6-second capacity, unchanged from
+# the shared repo's default -- see that repo's src/generated/synthetic_audio_data.h)
+# without a rebuild.
+#
+# Run with:
+#   renode renode/wakeword_demo.resc
+# Then, in another terminal:
+#   python3 ../stm32f4_audio_examples/audio_in_to_wav/tools/uart_to_wav.py --tcp localhost:3456 --duration 1
+#     (that tool saves WAV/PCM; to just watch predictions, `nc localhost 3456`
+#     or `picocom` works too -- see ../README.md "Testing with Renode")
+#
+# To test your own WAV instead, see tools/run_wakeword_demo.py or the manual
+# `renode -e "$pcm_file=@...; $pcm_samples=N" renode/wakeword_demo.resc` steps
+# documented in ../README.md.
+
+$bin ?= @build/stm32-renode/firmware.elf
+$pcm_file ?= @renode/default_synthetic_audio.bin
+$pcm_samples ?= 32000
+
+mach create
+machine LoadPlatformDescription @renode/stm32f4_discovery_full.repl
+sysbus LoadELF $bin
+
+sysbus LoadBinary $pcm_file `sysbus GetSymbolAddress "synthetic_audio_pcm"`
+
+# synthetic_audio_pcm_len lives in .data (RAM, not flash), so writing it here
+# -- before `start` -- gets silently clobbered the instant Reset_Handler
+# copies .data from flash to RAM during boot. Fix: stash the override value
+# in CCM RAM scratch space and copy it into the real variable via a one-shot
+# CPU hook at pdm_mic_init() entry, which runs after the .data copy but
+# before anything reads synthetic_audio_pcm_len.
+#
+# IMPORTANT: unlike the audio_in_to_wav reference this is adapted from, this
+# project's CCM RAM is NOT mostly-empty scratch space -- spectrogram.c's FFT
+# buffer, Hann window table, and STFT row scratch also live there (see
+# src/spectrogram.c and ../README.md "Memory budget"), and pdm_mic.c's own
+# 32000-byte PCM ring buffer starts at the very base of CCM RAM (0x10000000)
+# via its __attribute__((section(".ccmram"))) placement with no explicit
+# origin offset, so the linker places it first. 0x10000000 is therefore
+# NOT free scratch space here -- writing there would corrupt the ring
+# buffer's first bytes. Use the LAST word of CCM RAM instead
+# (0x10000000 + 0x10000 - 4 = 0x1000FFFC), which is always free: CCM usage
+# tops out at 40072 of 65536 bytes (measured), leaving that address well
+# past everything the linker places there.
+sysbus WriteDoubleWord 0x1000FFFC $pcm_samples
+cpu AddHook `sysbus GetSymbolAddress "pdm_mic_init"` "self.Bus.WriteDoubleWord(self.Bus.GetSymbolAddress('synthetic_audio_pcm_len'), self.Bus.ReadDoubleWord(0x1000FFFC))"
+
+# Bridge USART2 to a TCP server socket on port 3456.
+emulation CreateServerSocketTerminal 3456 "uart_term" false
+connector Connect sysbus.usart2 uart_term
+
+start

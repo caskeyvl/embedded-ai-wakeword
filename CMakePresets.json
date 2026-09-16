@@ -1,0 +1,47 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "host",
+      "displayName": "Linux host (validation without hardware)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/host",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "TARGET_PLATFORM": "host",
+        "EXECUTORCH_BUILD_DIR": "$env{HOME}/executorch/executorch-build/host"
+      }
+    },
+    {
+      "name": "stm32",
+      "displayName": "STM32F407 (bare-metal, real PDM mic)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/stm32",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "MinSizeRel",
+        "TARGET_PLATFORM": "stm32",
+        "MIC_SOURCE": "real",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/arm-none-eabi.cmake",
+        "EXECUTORCH_BUILD_DIR": "$env{HOME}/executorch/executorch-build/cortex-m4"
+      }
+    },
+    {
+      "name": "stm32-renode",
+      "displayName": "STM32F407 (bare-metal, synthetic mic for Renode)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/stm32-renode",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "MinSizeRel",
+        "TARGET_PLATFORM": "stm32",
+        "MIC_SOURCE": "synthetic",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/arm-none-eabi.cmake",
+        "EXECUTORCH_BUILD_DIR": "$env{HOME}/executorch/executorch-build/cortex-m4"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "host", "configurePreset": "host" },
+    { "name": "stm32", "configurePreset": "stm32" },
+    { "name": "stm32-renode", "configurePreset": "stm32-renode" }
+  ]
+}

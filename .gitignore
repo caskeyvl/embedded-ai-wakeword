@@ -1,0 +1,17 @@
+build/
+__pycache__/
+*.pyc
+*.o
+tools/spectrogram_dump
+tools/_synthetic_test_tone.wav
+
+# Checkpoints are regenerable and can be large; not shipped.
+models/*.pt
+
+# ExactMatchCNN's .pte is a ~44MB host-only reference artifact (see
+# README-training-parameters.md) -- too large to commit, but the numbers it
+# produces DO belong in submission/model_metrics.json.
+models/wakeword_exact.pte
+
+# wakeword_improved.pte lives in submission/model.pte instead of models/ --
+# see README-submission-instructions.md.

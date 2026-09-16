@@ -1,0 +1,26 @@
+using "platforms/boards/stm32f4_discovery.repl"
+
+// Copied unchanged from
+// ../../stm32f4_audio_examples/audio_in_to_wav/renode/stm32f4_discovery_full.repl
+// -- this project's hal_init() (referenced from that same repo) uses the
+// identical 168 MHz PLL clock tree, so the systickFrequency override below
+// still applies exactly. sram/flash sizes match the real STM32F407VG this
+// project also targets.
+nvic:
+    systickFrequency: 168000000
+
+// Real STM32F407 has 64KB of CPU-only CCM RAM at 0x10000000; missing from
+// Renode's stock stm32f4.repl entirely. Holds pdm_mic.c/synthetic_mic.c's
+// PCM ring buffer AND this project's spectrogram.c FFT/Hann-window scratch
+// (40072 bytes total measured -- see ../README.md "Memory budget").
+ccmram: Memory.MappedMemory @ sysbus 0x10000000
+    size: 0x10000
+
+// Stock stm32f4.repl models sram as 256KB and flash as 2MB (likely copied
+// from a bigger STM32F4 variant). The real STM32F407VG has 128KB of
+// contiguous main SRAM (@ 0x20000000) and 1MB of flash (@ 0x08000000).
+sram:
+    size: 0x20000
+
+flash:
+    size: 0x100000
