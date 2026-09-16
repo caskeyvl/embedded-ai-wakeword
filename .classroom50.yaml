@@ -1,0 +1,12 @@
+schema: "classroom50/repo-config/v1"
+classroom: "embeddedai-fall2026"
+assignment: "lab1-wakeword"
+owner:
+  username: "caskeyvl"
+  id: 78925941
+  accepted_at: "2026-09-16T14:58:34Z"
+source:
+  owner: "ColoradoEmbeddedAI-Fall2026"
+  owner_id: 305599173
+  repo: "lab1_wakeword_provided"
+  branch: "main"
