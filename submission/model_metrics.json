@@ -1,0 +1,8 @@
+{
+  "exact_match_val_accuracy": 0.903333306312561,
+  "exact_match_param_count": 11193348,
+  "exact_match_pte_bytes": 44778768,
+  "improved_val_accuracy": 0.8899999856948853,
+  "improved_param_count": 10052,
+  "improved_pte_bytes": 57888
+}

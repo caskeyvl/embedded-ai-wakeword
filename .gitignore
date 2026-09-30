@@ -12,6 +12,13 @@ models/*.pt
 # README-training-parameters.md) -- too large to commit, but the numbers it
 # produces DO belong in submission/model_metrics.json.
 models/wakeword_exact.pte
+models/exact_match_cnn.pte
+models/*.pte
 
 # wakeword_improved.pte lives in submission/model.pte instead of models/ --
-# see README-submission-instructions.md.
+# see README-submission-instructions.md (unaffected by the models/*.pte rule
+# above, which only matches inside models/).
+
+# Speech Commands dataset (~5.5GB, downloaded by models/train_wakeword.py) --
+# never belongs in the repo.
+data/

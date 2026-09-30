@@ -68,8 +68,11 @@ static const uint32_t WINDOW_SAMPLES = SPEC_NUM_SAMPLES;  /* 16000 = 1.0 s */
  * non_const_buffer_sizes; method_pool has to be found by trial). These are
  * NOT safe defaults for an arbitrary model -- re-measure if you change the
  * architecture. */
-static uint8_t method_pool[0];
-static uint8_t planned_pool[0];
+/* planned_pool minimum read off submission/model.pte via non_const_buffer_sizes
+ * (37376 bytes) -- sized here with headroom. method_pool found by trial
+ * (32KB loads fine for this model; see README-testing.md "Memory budget"). */
+static uint8_t method_pool[32 * 1024];
+static uint8_t planned_pool[40 * 1024];
 
 /* Linear copy of one inference window, populated by the STUDENT SECTION's
  * read step before any spectrogram/inference work touches it. This copy is
@@ -106,37 +109,28 @@ int main(void) {
     spectrogram_init();
     uart_puts("hal_init/pdm_mic_init/spectrogram_init OK\r\n");
 
-    /* ═══════════════════════════════════════════════════════════════════
-     * TODO(student): initialize the ExecuTorch runtime and load the model.
-     * Pseudocode:
-     *
-     *   1. runtime_init()
-     *   2. Wrap the embedded model array (wakeword_pte / wakeword_pte_len,
-     *      declared in the generated wakeword_pte.h, built from your
-     *      submission/model.pte) in a BufferDataLoader.
-     *   3. Program::load(&loader, Program::Verification::Minimal) -- check
-     *      the Result's .ok(); on failure, print an error over UART and
-     *      spin forever (`while (1);`) rather than continuing with a
-     *      program that didn't load.
-     *   4. Build:
-     *        - a MemoryAllocator over method_pool
-     *        - a HierarchicalAllocator wrapping a single
-     *          Span<uint8_t>(planned_pool, sizeof(planned_pool)) --
-     *          activation tensors carry FlatBuffer memory_id=1, which the
-     *          runtime converts to C++ index 0, so spans[0] must cover the
-     *          whole planned_pool
-     *        - a MemoryManager from both of the above
-     *   5. program.load_method("forward", &memory_manager) -- check .ok().
-     *      Common failures: 0x21 = MemoryAllocationFailed (grow
-     *      method_pool/planned_pool -- see the TODO above), 0x14 =
-     *      OperatorMissing (rebuild ExecuTorch with the op list your
-     *      export step printed -- see ../README.md "Building/rebuilding
-     *      ExecuTorch").
-     *   6. Move the resulting Method out of the Result for use in the loop
-     *      below (`Method method = std::move(method_result.get());`) --
-     *      everything below this comment block assumes a `method` object
-     *      is in scope.
-     * ═══════════════════════════════════════════════════════════════════ */
+    runtime_init();
+
+    BufferDataLoader loader(wakeword_pte, wakeword_pte_len);
+    Result<Program> program_result = Program::load(&loader, Program::Verification::Minimal);
+    if (!program_result.ok()) {
+        uart_printf("ERROR: Program::load failed (0x%x)\r\n", (unsigned)program_result.error());
+        while (1);
+    }
+    Program program = std::move(program_result.get());
+
+    MemoryAllocator method_allocator(sizeof(method_pool), method_pool);
+    Span<uint8_t> planned_span(planned_pool, sizeof(planned_pool));
+    HierarchicalAllocator planned_allocator({&planned_span, 1});
+    MemoryManager memory_manager(&method_allocator, &planned_allocator);
+
+    Result<Method> method_result = program.load_method("forward", &memory_manager);
+    if (!method_result.ok()) {
+        uart_printf("ERROR: load_method failed (0x%x)\r\n", (unsigned)method_result.error());
+        while (1);
+    }
+    Method method = std::move(method_result.get());
+    uart_puts("ExecuTorch method loaded OK\r\n");
 
     /* Tensor/TensorImpl metadata (shape, strides, dtype) never changes across
      * iterations, so it's constructed once here -- but method.set_input()
@@ -241,8 +235,113 @@ int main(void) {
      * can tell the board is alive between detections.
      * ═══════════════════════════════════════════════════════════════════ */
 
+    static const int32_t  VAD_WINDOW_SAMPLES = 320;   /* 20 ms RMS window */
+    static const uint32_t VAD_CHECK_PERIOD_MS = 20;
+    static const float    VAD_RMS_THRESHOLD = 900.0f;
+    static const uint32_t VAD_DEBOUNCE_MS = 60;        /* sustained activity to trigger */
+    static const uint32_t COOLDOWN_MS = 150;           /* after a prediction, before re-arming --
+                                                         * kept short because spectrogram+inference
+                                                         * (under Renode's simulated CPU, ~1s) already
+                                                         * eats most of the gap between back-to-back
+                                                         * words in the grader's multi-word clips */
+    static const float    CONF_THRESHOLD = 0.5f;
+
+    /* Debug values for submission/debug_values.json -- static so GDB can
+     * print them by name after a breakpoint right after the DETECTED print. */
+    static volatile uint32_t g_onset_sample = 0;
+    static volatile uint32_t g_written_at_detection = 0;
+
+    enum VadState { STATE_IDLE, STATE_CAPTURING };
+    VadState state = STATE_IDLE;
+
+    uint32_t next_vad_check_ms = 0;
+    uint32_t active_run_ms = 0;
+    uint32_t capture_start = 0;
+    uint32_t cooldown_until_ms = 0;
+
     while (1) {
-        /* TODO(student): implement the loop described above. */
+        uint32_t now = hal_ticks_ms();
+        uint32_t written = pdm_mic_samples_written();
+
+        if (state == STATE_IDLE) {
+            if (now >= cooldown_until_ms && now >= next_vad_check_ms
+                && written >= (uint32_t)VAD_WINDOW_SAMPLES) {
+                next_vad_check_ms = now + VAD_CHECK_PERIOD_MS;
+
+                uint32_t base = written - VAD_WINDOW_SAMPLES;
+                int64_t sumsq = 0;
+                for (int32_t i = 0; i < VAD_WINDOW_SAMPLES; i++) {
+                    int32_t s = ring[(base + (uint32_t)i) % ring_capacity];
+                    sumsq += (int64_t)s * s;
+                }
+                float rms = sqrtf((float)sumsq / (float)VAD_WINDOW_SAMPLES);
+
+                if (rms > VAD_RMS_THRESHOLD) {
+                    if (active_run_ms == 0) {
+                        g_onset_sample = base;  /* first check that crossed threshold */
+                    }
+                    active_run_ms += VAD_CHECK_PERIOD_MS;
+
+                    if (active_run_ms >= VAD_DEBOUNCE_MS) {
+                        g_written_at_detection = pdm_mic_samples_written();
+                        uart_puts("DETECTED\r\n");
+                        /* Capture forward from the detected onset, not the most
+                         * recent window ending now -- the latter is almost
+                         * entirely pre-speech, since detection fires right as
+                         * the word starts. */
+                        capture_start = g_onset_sample;
+                        state = STATE_CAPTURING;
+                        active_run_ms = 0;
+                    }
+                } else {
+                    active_run_ms = 0;
+                }
+            }
+        } else { /* STATE_CAPTURING */
+            uint32_t target = capture_start + WINDOW_SAMPLES;
+            if ((int32_t)(written - target) >= 0) {
+                for (uint32_t i = 0; i < WINDOW_SAMPLES; i++) {
+                    window_scratch[i] = ring[(capture_start + i) % ring_capacity];
+                }
+
+                uint32_t t0 = hal_ticks_ms();
+                spectrogram_compute(window_scratch, spectrogram_out);
+                uint32_t t1 = hal_ticks_ms();
+
+                Error set_err = method.set_input(EValue(input_tensor), 0);
+                if (set_err != Error::Ok) {
+                    uart_printf("ERROR: set_input failed (0x%x)\r\n", (unsigned)set_err);
+                } else {
+                    Error exec_err = method.execute();
+                    uint32_t t2 = hal_ticks_ms();
+                    if (exec_err != Error::Ok) {
+                        uart_printf("ERROR: execute failed (0x%x)\r\n", (unsigned)exec_err);
+                    } else {
+                        const float *logits =
+                            method.get_output(0).toTensor().const_data_ptr<float>();
+
+                        int pred = 0;
+                        for (int i = 1; i < WAKEWORD_NUM_CLASSES; i++) {
+                            if (logits[i] > logits[pred]) pred = i;
+                        }
+                        float conf = softmax_confidence(logits, WAKEWORD_NUM_CLASSES, pred);
+                        const char *label =
+                            (conf >= CONF_THRESHOLD) ? WAKEWORD_CLASS_NAMES[pred] : "unknown";
+
+                        uart_printf("DEBUG: onset=%u written=%u argmax=%s raw_conf=%f\r\n",
+                                    (unsigned)g_onset_sample, (unsigned)g_written_at_detection,
+                                    WAKEWORD_CLASS_NAMES[pred], (double)conf);
+                        uart_printf("PREDICTION: %s conf=%f\r\n", label, (double)conf);
+                        uart_printf("TIMING: spectrogram_ms=%u inference_ms=%u\r\n",
+                                    (unsigned)(t1 - t0), (unsigned)(t2 - t1));
+                    }
+                }
+
+                cooldown_until_ms = hal_ticks_ms() + COOLDOWN_MS;
+                state = STATE_IDLE;
+                active_run_ms = 0;
+            }
+        }
     }
     /* ===== END STUDENT SECTION ===== */
 }

@@ -1,0 +1,8 @@
+{
+  "board_spectrogram_ms": 15.0,
+  "board_inference_ms": 120.0,
+  "board_total_ms": 135.0,
+  "renode_spectrogram_ms": 89.0,
+  "renode_inference_ms": 988.0,
+  "renode_total_ms": 1077.0
+}
